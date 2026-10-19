@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dmm-photo-desk"
+version = "0.1.0"
+description = "A local photo watermarking and caption workspace for Damdamag Misyon Montanyosa"
+requires-python = ">=3.12"
+dynamic = ["dependencies"]
+
+[project.scripts]
+dmm-photo-desk = "dmm.__main__:main"
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.package-data]
+dmm = ["static/*"]
+
+[tool.setuptools.packages.find]
+include = ["dmm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
