@@ -5,6 +5,7 @@ Starts an isolated server and uses synthetic fixtures; never touches real event 
 
 import io
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -79,6 +80,17 @@ def run():
                 page.wait_for_function("() => document.querySelector('#preview-image').naturalWidth > 0")
                 with page.expect_response(lambda r: '/photos/' in r.url and r.request.method == 'PATCH'):
                     page.locator('#slider-zoom').evaluate("el => { el.value='1.4'; el.dispatchEvent(new Event('input',{bubbles:true})); }")
+                with page.expect_response(lambda r: '/photos/' in r.url and r.request.method == 'PATCH'):
+                    page.get_by_role('button',name='Rotate right',exact=True).click()
+                expect(page.locator('.rotation-value')).to_have_text('90°')
+                with page.expect_response(lambda r: '/photos/' in r.url and r.request.method == 'PATCH'):
+                    page.get_by_role('button',name='Flip horizontal',exact=True).click()
+                expect(page.get_by_role('button',name='Flip horizontal',exact=True)).to_have_attribute('aria-pressed','true')
+                with page.expect_response(lambda r: '/photos/' in r.url and r.request.method == 'PATCH'):
+                    page.locator('#slider-brightness').evaluate("el => { el.value='0.75'; el.dispatchEvent(new Event('input',{bubbles:true})); }")
+                page.get_by_role('button',name='Compare original',exact=True).click()
+                expect(page.locator('#preview-image')).to_have_attribute('src',re.compile('/before'))
+                page.get_by_role('button',name='Show edited',exact=True).click()
                 page.wait_for_function("() => document.querySelector('#preview-image').complete")
                 page.screenshot(path="/tmp/dmm-workspace.png",full_page=True)
                 page.locator('[data-favorite]').first.click()
@@ -89,12 +101,14 @@ def run():
                 page.locator('[data-select]').last.click()
                 expect(page.get_by_role("button",name="Export 1 photo",exact=True)).to_be_enabled()
                 page.get_by_role("tab",name="Caption maker").click()
+                expect(page.get_by_role('button',name='Generate AI caption',exact=True)).to_be_disabled()
                 page.locator('[name="activities"]').fill("Participants attended a leadership workshop.")
                 page.locator('[name="purpose"]').fill("The workshop focused on Christian service.")
                 # Unsaved fact fields survive switching tools.
                 page.get_by_role("tab",name="Photos").click()
                 page.get_by_role("tab",name="Caption maker").click()
                 expect(page.locator('[name="activities"]')).to_have_value("Participants attended a leadership workshop.")
+                page.get_by_role('button',name='Offline template',exact=True).click()
                 page.get_by_role("button",name="Create draft",exact=True).click()
                 expect(page.locator('#caption-text')).to_contain_text("#damdamagmisyonmontanyosa")
                 caption = page.locator('#caption-text').input_value()
@@ -103,6 +117,55 @@ def run():
                 assert page.evaluate("navigator.clipboard.readText()") == caption
                 page.get_by_role("button",name="Save caption",exact=True).click()
                 expect(page.locator('#caption-save-state')).to_have_text("Saved to CAPTIONS")
+                # Exercise the real connection settings UI with a synthetic key.
+                # Only the AI result is mocked here; transport is covered by API tests.
+                page.get_by_role('button',name='AI writer',exact=True).click()
+                page.get_by_role('button',name='Connect',exact=True).click()
+                page.locator('#ai-key').fill('browser-test-key-not-a-real-credential')
+                page.locator('#ai-submit').click()
+                expect(page.locator('#ai-dialog')).not_to_be_visible()
+                expect(page.get_by_role('button',name='Generate AI caption',exact=True)).to_be_enabled()
+                assert 'browser-test-key' not in ''.join(path.read_text() for path in (root/'events').rglob('*.json'))
+                assert page.locator('#ai-key').input_value() == ''
+                generated = caption.replace('DMM Browser Test Event','DMM Browser Test Event — A Focus on Service',1)
+                ai_payloads, ai_requests, fact_requests = [], [], []
+                def ai_result(route):
+                    ai_payloads.append(route.request.post_data_json)
+                    ai_requests.append(route)
+                def hold_fact_save(route):
+                    if route.request.method == 'PUT':
+                        fact_requests.append(route)
+                    else:
+                        route.continue_()
+                page.route('**/api/events/*/captions/generate',ai_result)
+                page.route('**/api/events/*',hold_fact_save)
+                page.locator('#caption-length').select_option('short')
+                page.locator('#caption-instructions').fill('Keep the language warm and concise.')
+                page.once('dialog',lambda dialog: dialog.accept())
+                page.get_by_role('button',name='Generate AI caption',exact=True).click()
+                expect(page.locator('#caption-text')).to_be_disabled()
+                expect(page.get_by_role('tab',name='Photos')).to_be_disabled()
+                expect(page.locator('#library-nav')).to_be_disabled()
+                # Lock before saving facts as well as during the paid AI call.
+                assert len(fact_requests) == 1
+                assert not ai_requests
+                fact_requests[0].fulfill(response=fact_requests[0].fetch())
+                page.unroute('**/api/events/*',hold_fact_save)
+                expect(page.get_by_role('button',name='Writing your caption…',exact=True)).to_be_disabled()
+                page.wait_for_function('() => document.querySelector("#caption-text").matches(":disabled")')
+                # Wait for the AI request without substituting a live provider.
+                deadline = time.monotonic() + 10
+                while not ai_requests and time.monotonic() < deadline:
+                    page.wait_for_timeout(50)
+                assert len(ai_requests) == 1
+                ai_requests[0].fulfill(status=200,json={'text':generated,'missing':[],'mode':'ai','provider':'OpenAI','model':'gpt-4.1-mini'})
+                expect(page.locator('#caption-text')).to_have_value(generated)
+                assert ai_payloads[0]['mode'] == 'ai' and ai_payloads[0]['length'] == 'short'
+                assert ai_payloads[0]['instructions'] == 'Keep the language warm and concise.'
+                page.unroute('**/api/events/*/captions/generate',ai_result)
+                caption = generated
+                page.get_by_role('button',name='Save caption',exact=True).click()
+                expect(page.locator('#caption-save-state')).to_have_text('Saved to CAPTIONS')
                 page.screenshot(path="/tmp/dmm-captions.png",full_page=True)
                 page.get_by_role("tab",name="Photos").click()
                 page.get_by_role("button",name="Export 1 photo",exact=True).click()
@@ -116,6 +179,9 @@ def run():
                 page.locator('#library-nav').click()
                 page.locator('.event-card').click()
                 expect(page.locator('#slider-zoom')).to_have_value("1.4")
+                expect(page.locator('#slider-brightness')).to_have_value('0.75')
+                expect(page.locator('.rotation-value')).to_have_text('90°')
+                expect(page.get_by_role('button',name='Flip horizontal',exact=True)).to_have_attribute('aria-pressed','true')
                 page.get_by_role("tab",name="Caption maker").click()
                 expect(page.locator('#caption-text')).to_have_value(caption)
                 page.get_by_role("tab",name="Photos").click()
@@ -125,7 +191,7 @@ def run():
                 assert not errors, f"Browser errors: {errors}"
                 assert not external, f"Unexpected network requests: {external}"
                 browser.close()
-                print("Browser workflow passed: create, import, overlay, crop, favorites, selection, caption, clipboard, export, ZIP, reopen, mobile; no browser errors or external requests.")
+                print("Browser workflow passed: import, overlay, rotate, flip, adjust, compare, favorites, selection, offline caption, AI key settings, mocked AI caption, clipboard, export, ZIP, reopen, mobile. No browser errors or external requests. Live AI requires a real key.")
         finally:
             server.terminate()
             try: server.wait(timeout=10)

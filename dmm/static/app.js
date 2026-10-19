@@ -5,8 +5,11 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const state = {events: [], active: null, photo: null, tab: 'photos', filter: 'all', busy: false,
-  settings: null, caption: null, editing: false, revision: 0, job: null, facts: null, factsDirty: false};
-let pendingPhoto = null, photoTimer = null, photoWrites = Promise.resolve();
+  settings: null, ai: null, caption: null, editing: false, revision: 0, job: null, facts: null, factsDirty: false,
+  compareOriginal: false, generatingCaption: false};
+const editDefaults = {rotation:0,flip_horizontal:false,flip_vertical:false,brightness:1,contrast:1,saturation:1,sharpness:1};
+const photoSettingKeys = ['x','y','zoom',...Object.keys(editDefaults)];
+let pendingPhoto = null, photoTimer = null, photoWrites = Promise.resolve(), exportSettingsWrites = Promise.resolve();
 
 async function api(path, options = {}) {
   const headers = options.body && !(options.body instanceof FormData) ? {'Content-Type':'application/json'} : {};
@@ -78,7 +81,7 @@ function renderLibrary(query = '') {
         ${step('03','Ready for your final review','Draft a factual caption, export your photos, and share your story.')}
       </div>
     </section>`}
-    <div class="local-note">${icon('shield')}<span><strong>Made to stay on your computer.</strong> Photo processing and caption templates work locally. Your original photos are always preserved.</span></div>`;
+    <div class="local-note">${icon('shield')}<span><strong>Your photos stay on your computer.</strong> Editing and watermarking work locally. AI captions send only your event text to OpenAI when you choose to generate.</span></div>`;
   if (state.events.length) renderEventCards(query);
   renderSidebar();
 }
@@ -107,8 +110,9 @@ async function openEvent(id) {
   await flushPhoto();
   const [event, caption] = await Promise.all([api(`/events/${id}`), api(`/events/${id}/captions`)]);
   state.active = event; state.photo = event.photos[0]?.id || null; state.tab = 'photos'; state.filter = 'all'; state.job = null;
+  state.compareOriginal = false;
   state.facts = {activities:event.activities, purpose:event.purpose, outcomes:event.outcomes}; state.factsDirty = false;
-  state.caption = {text:caption.text, saved:caption.text, dirty:false, missing:[], style:'album', photo_caption:'', include_footer:true, include_credit:true, stale:false};
+  state.caption = {text:caption.text, saved:caption.text, dirty:false, missing:[], style:'album', photo_caption:'', include_footer:true, include_credit:true, stale:false, mode:'ai', length:'standard', instructions:'', generatedMode:null};
   renderWorkspace();
 }
 
@@ -128,8 +132,8 @@ function renderWorkspace() {
       <div class="heading-actions"><button class="button secondary small" data-action="edit-event" ${disabled()}>${icon('edit')}Event details</button>
       <button class="button secondary small" data-action="open-folder">${icon('folder')}Open folder</button></div></div>
     <div class="tabs" role="tablist" aria-label="Event tools">
-      <button class="tab ${state.tab === 'photos' ? 'active' : ''}" data-tab="photos" role="tab" aria-selected="${state.tab === 'photos'}">${icon('photo')}Photos<span class="tab-count">${event.photos.length}</span></button>
-      <button class="tab ${state.tab === 'captions' ? 'active' : ''}" data-tab="captions" role="tab" aria-selected="${state.tab === 'captions'}">${icon('text')}Caption maker</button>
+      <button class="tab ${state.tab === 'photos' ? 'active' : ''}" data-tab="photos" role="tab" aria-selected="${state.tab === 'photos'}" ${state.generatingCaption ? 'disabled' : ''}>${icon('photo')}Photos<span class="tab-count">${event.photos.length}</span></button>
+      <button class="tab ${state.tab === 'captions' ? 'active' : ''}" data-tab="captions" role="tab" aria-selected="${state.tab === 'captions'}" ${state.generatingCaption ? 'disabled' : ''}>${icon('text')}Caption maker</button>
     </div>
     <section id="event-pane" aria-label="${state.tab === 'photos' ? 'Photo workspace' : 'Caption maker'}">${state.tab === 'photos' ? photosHTML() : captionsHTML()}</section>
     <div class="storage-strip">${icon('folder')}<span>${escapeHTML(event.folder)}</span></div>`;
@@ -174,26 +178,54 @@ function renderPreview() {
   if (!$('#preview-panel')) return;
   const photo = selectedPhoto();
   if (!photo) { $('#preview-panel').innerHTML = '<div class="empty-gallery">Choose a photo to preview it.</div>'; return; }
-  $('#preview-panel').innerHTML = `<div class="panel-header"><h3>Publication preview</h3><span id="preview-state">${state.active.has_watermark ? 'With DMM watermark' : 'Original photo'}</span></div>
-    <div class="preview-stage"><img id="preview-image" src="${photoURL(photo, 'preview')}?v=${state.revision}" alt="Publication preview of ${escapeHTML(photo.name)}"></div>
-    <div class="preview-controls"><div class="control-heading"><strong>Photo framing</strong><button class="button ghost small" data-action="reset-framing" ${disabled()}>${icon('reset')}Reset</button></div>
+  $('#preview-panel').innerHTML = `<div class="panel-header"><h3>Publication preview</h3><button class="button ghost small" id="compare-button" data-action="compare-original" aria-pressed="${state.compareOriginal}">${icon('eye')}${state.compareOriginal ? 'Show edited' : 'Compare original'}</button></div>
+    <div class="preview-stage"><img id="preview-image" src="${photoURL(photo, state.compareOriginal ? 'before' : 'preview')}?v=${state.revision}" alt="${state.compareOriginal ? 'Original' : 'Publication preview'} of ${escapeHTML(photo.name)}"></div>
+    <div class="preview-controls"><div class="transform-toolbar" aria-label="Rotate and flip photo">
+      <button class="button secondary small" data-action="rotate-left" ${disabled()}>${icon('rotate-left')}Rotate left</button>
+      <button class="button secondary small" data-action="rotate-right" ${disabled()}>${icon('rotate-right')}Rotate right</button>
+      <button class="icon-button ${photo.flip_horizontal ? 'toggled' : ''}" data-action="flip-horizontal" aria-label="Flip horizontal" aria-pressed="${photo.flip_horizontal}" ${disabled()}>${icon('flip-h')}</button>
+      <button class="icon-button ${photo.flip_vertical ? 'toggled' : ''}" data-action="flip-vertical" aria-label="Flip vertical" aria-pressed="${photo.flip_vertical}" ${disabled()}>${icon('flip-v')}</button>
+      <span class="rotation-value">${photo.rotation}°</span></div>
+    <div class="editor-controls-grid"><section><div class="control-heading"><strong>Photo framing</strong><button class="button ghost small" data-action="reset-framing" ${disabled()}>Reset</button></div>
     ${slider('zoom','Zoom',photo.zoom,1,3,.01,`${Number(photo.zoom).toFixed(2)}×`)}
     ${slider('x','Horizontal',photo.x,0,1,.01,`${Math.round(photo.x * 100)}%`)}
     ${slider('y','Vertical',photo.y,0,1,.01,`${Math.round(photo.y * 100)}%`)}
     ${slider('opacity','Watermark',state.active.opacity,.1,1,.05,`${Math.round(state.active.opacity * 100)}%`)}
-    <p class="preview-footnote">${state.active.has_watermark ? 'Photos fill your template without stretching. Move or zoom to keep faces clear of the branding. Framing saves automatically.' : 'Load your watermark to enable framing. Its proportions determine the final image shape.'}<br>Source: ${photo.width} × ${photo.height} px. Exports never upscale the photo.</p></div>`;
+    </section><section><div class="control-heading"><strong>Basic adjustments</strong><button class="button ghost small" data-action="reset-edits" ${disabled()}>Reset edits</button></div>
+    ${slider('brightness','Brightness',photo.brightness,.25,2,.05,`${Math.round(photo.brightness * 100)}%`)}
+    ${slider('contrast','Contrast',photo.contrast,.25,2,.05,`${Math.round(photo.contrast * 100)}%`)}
+    ${slider('saturation','Color',photo.saturation,0,2,.05,`${Math.round(photo.saturation * 100)}%`)}
+    ${slider('sharpness','Sharpness',photo.sharpness,0,3,.1,`${Math.round(photo.sharpness * 100)}%`)}
+    </section></div><p class="preview-footnote">${state.active.has_watermark ? 'Photos fill your template without stretching. All edits save automatically and affect the photo beneath your watermark.' : 'Photo edits work now. Load your watermark to enable framing and export.'}<br>Source: ${photo.width} × ${photo.height} px. Originals stay unchanged.</p></div>`;
   $('#preview-image').addEventListener('error', () => {
     if ($('#preview-state')) $('#preview-state').textContent = 'Preview unavailable — try reloading the event';
   });
 }
 
 function slider(key, label, value, min, max, step, output) {
-  return `<label class="slider-row" for="slider-${key}"><span>${label}</span><input id="slider-${key}" data-slider="${key}" type="range" min="${min}" max="${max}" step="${step}" value="${value}" ${state.busy || !state.active.has_watermark ? 'disabled' : ''}><output id="output-${key}">${output}</output></label>`;
+  const needsWatermark = ['x','y','zoom','opacity'].includes(key);
+  return `<label class="slider-row" for="slider-${key}"><span>${label}</span><input id="slider-${key}" data-slider="${key}" type="range" min="${min}" max="${max}" step="${step}" value="${value}" ${state.busy || needsWatermark && !state.active.has_watermark ? 'disabled' : ''}><output id="output-${key}">${output}</output></label>`;
+}
+
+function refreshPreviewImage() {
+  const photo = selectedPhoto();
+  if (photo && $('#preview-image')) $('#preview-image').src = `${photoURL(photo, state.compareOriginal ? 'before' : 'preview')}?v=${state.revision}`;
+  if ($('#compare-button')) {
+    $('#compare-button').setAttribute('aria-pressed', String(state.compareOriginal));
+    $('#compare-button').innerHTML = `${icon('eye')}${state.compareOriginal ? 'Show edited' : 'Compare original'}`;
+  }
+}
+
+async function transformPhoto(changes) {
+  if (!selectedPhoto()) return;
+  Object.assign(selectedPhoto(),changes); state.compareOriginal = false;
+  queuePhoto(); await flushPhoto(); renderPreview();
 }
 
 function queuePhoto() {
   const photo = selectedPhoto();
   if (!photo) return;
+  delete photo.exported_at; updateDownload();
   pendingPhoto = {eventId:state.active.id, photo:{...photo}};
   clearTimeout(photoTimer);
   photoTimer = setTimeout(() => flushPhoto().catch(reportError), 240);
@@ -203,15 +235,15 @@ async function flushPhoto() {
   clearTimeout(photoTimer);
   if (pendingPhoto) {
     const pending = pendingPhoto; pendingPhoto = null;
-    const {x,y,zoom,selected,favorite} = pending.photo;
+    const settings = Object.fromEntries(photoSettingKeys.map(key => [key, pending.photo[key]]));
     photoWrites = photoWrites.catch(() => {}).then(async () => {
-      const updated = await api(`/events/${pending.eventId}/photos/${pending.photo.id}`, {method:'PATCH',body:JSON.stringify({x,y,zoom,selected,favorite})});
+      const updated = await api(`/events/${pending.eventId}/photos/${pending.photo.id}`, {method:'PATCH',body:JSON.stringify(settings)});
       if (state.active?.id === pending.eventId) {
         const current = state.active.photos.find(photo => photo.id === updated.id);
         // Local slider values may already be ahead of this queued response.
         if (current && !updated.exported_at) delete current.exported_at;
         state.revision++;
-        if (state.photo === updated.id && $('#preview-image')) $('#preview-image').src = `${photoURL(current, 'preview')}?v=${state.revision}`;
+        if (state.photo === updated.id) refreshPreviewImage();
         updateDownload();
         renderGallery();
       }
@@ -226,41 +258,85 @@ function updateDownload() {
 }
 
 async function saveExportSettings() {
-  await flushPhoto();
   const event = state.active;
   const settings = {opacity:event.opacity, long_edge:Number($('#export-size')?.value ?? event.long_edge), format:$('#export-format')?.value ?? event.format};
-  state.active = await api(eventURL('/export-settings'), {method:'PUT',body:JSON.stringify(settings)});
-  state.revision++;
-  if ($('#preview-image') && selectedPhoto()) $('#preview-image').src = `${photoURL(selectedPhoto(), 'preview')}?v=${state.revision}`;
-  renderGallery(); updateDownload();
+  const eventId = event.id;
+  // Snapshot and enqueue before yielding; edits and consecutive settings changes
+  // must not overwrite each other's local state or overtake one another.
+  exportSettingsWrites = exportSettingsWrites.catch(() => {}).then(async () => {
+    await flushPhoto();
+    const updated = await api(`/events/${eventId}/export-settings`, {method:'PUT',body:JSON.stringify(settings)});
+    if (state.active?.id !== eventId) return;
+    for (const key of ['opacity','long_edge','format']) state.active[key] = updated[key];
+    for (const photo of state.active.photos) {
+      if (!updated.photos.find(item => item.id === photo.id)?.exported_at) delete photo.exported_at;
+    }
+    state.revision++; refreshPreviewImage(); renderGallery(); updateDownload();
+  });
+  await exportSettingsWrites;
 }
 
 function captionsHTML() {
   const event = state.active, caption = state.caption;
-  return `<div class="caption-layout"><section class="card"><h3>Start with the facts.</h3><p class="card-intro">Your event details shape the caption. Use confirmed information and complete sentences.</p>
+  return `<fieldset class="caption-workspace" ${state.generatingCaption ? 'disabled' : ''}><div class="caption-layout"><section class="card"><h3>Start with the facts.</h3><p class="card-intro">Your event details shape the caption. Use confirmed information and complete sentences.</p>
     <form id="facts-form" class="facts-form">
       <label>What actually happened?<textarea name="activities" rows="4" maxlength="8000" placeholder="Describe the confirmed activities and key moments.">${escapeHTML(state.facts.activities)}</textarea></label>
       <label>Why was the event held?<textarea name="purpose" rows="3" maxlength="4000" placeholder="State the ministry purpose or need the event addressed.">${escapeHTML(state.facts.purpose)}</textarea></label>
       <label>Verified outcomes <span class="field-note">Optional — include only confirmed results.</span><textarea name="outcomes" rows="3" maxlength="4000" placeholder="Confirmed decisions, outcomes, or follow-up plans.">${escapeHTML(state.facts.outcomes)}</textarea></label>
       <button class="button secondary small" type="submit" ${disabled()}>${icon('check')}Save event facts</button>
-    </form><p class="caption-principle">“News first, faith naturally.”</p><p class="field-note">Names, statistics, quotations, and spiritual outcomes are never invented. You make the final editorial decision.</p></section>
-    <section class="card"><h3>Caption maker</h3><p class="card-intro">Create an offline template draft from your saved facts, then make it your own.</p>
+    </form><p class="caption-principle">“News first, faith naturally.”</p><p class="field-note">Keep names, statistics, quotations, and outcomes grounded in confirmed facts. AI drafts need your final editorial review.</p></section>
+    <section class="card"><div class="caption-title"><h3>AI caption maker</h3><span class="ai-badge">${icon('sparkles')}DMM VOICE</span></div><p class="card-intro">Turn your confirmed event facts into a professional, mission-centered caption. Review the wording before publication.</p>
+      <div class="caption-mode" aria-label="Caption generation method"><button data-mode="ai" class="${caption.mode === 'ai' ? 'active' : ''}" aria-pressed="${caption.mode === 'ai'}" ${disabled()}>${icon('sparkles')}AI writer</button><button data-mode="template" class="${caption.mode === 'template' ? 'active' : ''}" aria-pressed="${caption.mode === 'template'}" ${disabled()}>Offline template</button></div>
+      ${caption.mode === 'ai' ? `<div class="ai-connection-strip"><span>${state.ai?.configured ? 'API key configured' : 'Connect your OpenAI API key'}<small>${escapeHTML(state.ai?.model || 'gpt-4.1-mini')} · ${state.ai?.configured ? 'Access is checked when generating' : 'Required for AI writing'}</small></span><button class="button secondary small" data-action="ai-settings" ${disabled()}>${state.ai?.configured ? 'Settings' : 'Connect'}</button></div>` : '<p class="field-note">Offline mode arranges your entered facts without calling an AI service.</p>'}
       <div class="caption-style" aria-label="Caption type"><button data-style="album" class="${caption.style === 'album' ? 'active' : ''}" aria-pressed="${caption.style === 'album'}">Album caption</button><button data-style="photo" class="${caption.style === 'photo' ? 'active' : ''}" aria-pressed="${caption.style === 'photo'}">Single photo</button></div>
       ${caption.style === 'photo' ? `<label>Describe this photo<textarea id="photo-description" maxlength="8000" placeholder="Who or what is shown? Use confirmed names and actions.">${escapeHTML(caption.photo_caption)}</textarea></label>` : ''}
+      ${caption.mode === 'ai' ? `<div class="ai-writing-options"><label>Caption length<select id="caption-length" ${disabled()}><option value="short" ${caption.length === 'short' ? 'selected' : ''}>Short · a quick highlight</option><option value="standard" ${caption.length === 'standard' ? 'selected' : ''}>Standard · event coverage</option><option value="long" ${caption.length === 'long' ? 'selected' : ''}>Detailed · a fuller story</option></select></label>
+      <label>Editorial direction <span class="field-note">Optional — guide the emphasis or tone, keeping the facts unchanged.</span><textarea id="caption-instructions" maxlength="1500" rows="2" placeholder="e.g. Emphasize youth participation and keep the tone warm." ${disabled()}>${escapeHTML(caption.instructions)}</textarea></label></div>` : ''}
       <div class="caption-options"><label class="check-label"><input type="checkbox" id="include-footer" ${caption.include_footer ? 'checked' : ''}>DMM footer &amp; hashtags</label><label class="check-label"><input type="checkbox" id="include-credit" ${caption.include_credit ? 'checked' : ''}>Photographer credit</label></div>
-      <button class="button primary" data-action="generate-caption" ${disabled()}>${icon('text')}Create draft</button>
+      <button class="button primary" data-action="generate-caption" ${state.busy || caption.mode === 'ai' && !state.ai?.configured ? 'disabled' : ''}>${icon(caption.mode === 'ai' ? 'sparkles' : 'text')}${state.generatingCaption ? 'Writing your caption…' : caption.mode === 'ai' ? 'Generate AI caption' : 'Create draft'}</button>
+      ${caption.mode === 'ai' ? '<p class="ai-send-note">Generating sends the saved event text and writing preferences to OpenAI. No photos are uploaded. API usage charges apply.</p>' : ''}
+      ${caption.error ? `<div class="caption-warning" role="alert"><strong>Caption generation could not finish.</strong>${escapeHTML(caption.error)} Your existing draft is preserved.</div>` : ''}
       <div class="caption-draft"><div class="caption-draft-header"><strong>Your caption</strong><span class="draft-badge">EDITORIAL REVIEW REQUIRED</span></div>
       <textarea id="caption-text" aria-label="Caption draft" maxlength="30000" placeholder="Your draft will appear here. You can also write or paste your own caption.">${escapeHTML(caption.text)}</textarea>
       <div class="caption-actions"><button class="button secondary small" data-action="copy-caption">${icon('copy')}Copy text</button><button class="button primary small" data-action="save-caption">${icon('check')}Save caption</button><span class="caption-saved" id="caption-save-state">${caption.dirty ? 'Unsaved changes' : caption.text ? 'Saved to CAPTIONS' : ''}</span></div>
       <div id="caption-notice">${captionNotice()}</div></div>
-    </section></div>`;
+    </section></div></fieldset>`;
 }
 
 function captionNotice() {
   const caption = state.caption;
   const missing = caption.missing.length ? `<strong>Details still needing confirmation</strong>${caption.missing.map(escapeHTML).join(' · ')}<br>` : '';
   const stale = caption.stale ? '<strong>Event facts changed.</strong>Create a new draft or update this caption to match the saved facts.<br>' : '';
-  return `<div class="caption-warning">${stale}${missing}This tool arranges your supplied facts. It does not verify them or publish anything. Review the final text before posting.</div>`;
+  return `<div class="caption-warning">${stale}${missing}${caption.generatedMode === 'ai' ? 'AI wording can contain mistakes. Check every name, number, quotation, and claim against your event facts.' : 'Confirm every detail against your event facts.'} Nothing is published automatically.</div>`;
+}
+
+async function showAISettings() {
+  state.ai = await api('/ai/settings');
+  $('#ai-form').reset(); $('#ai-key').value = ''; $('#ai-model').value = state.ai.model;
+  $('#ai-disconnect').hidden = state.ai.source !== 'session';
+  $('#ai-key').placeholder = state.ai.configured ? 'Leave blank to keep the configured key' : 'Paste your OpenAI API key';
+  $('#ai-status-note').textContent = state.ai.configured ? `Key configured from ${state.ai.source === 'environment' ? 'the launch environment' : 'this session'}. Generate a caption to check access.` : 'No API key is configured. Add one here, or use the offline template.';
+  $('#ai-dialog').showModal();
+}
+
+async function submitAI(event) {
+  event.preventDefault(); const button = $('#ai-submit'); button.disabled = true;
+  const payload = {model:$('#ai-model').value.trim()};
+  if ($('#ai-key').value.trim()) payload.api_key = $('#ai-key').value.trim();
+  $('#ai-key').value = '';
+  try {
+    state.ai = await api('/ai/settings',{method:'PUT',body:JSON.stringify(payload)});
+    $('#ai-dialog').close();
+    if (state.active && state.tab === 'captions') renderWorkspace();
+    toast(state.ai.configured ? 'AI settings saved. Generate a caption to check access.' : 'Model saved. Add an API key to use AI writing.');
+  } finally { button.disabled = false; }
+}
+
+async function disconnectAI() {
+  state.ai = await api('/ai/session',{method:'DELETE'});
+  $('#ai-dialog').close();
+  if (state.active && state.tab === 'captions') renderWorkspace();
+  toast(state.ai.configured ? 'Session key forgotten. The launch environment still supplies a key.' : 'Session key forgotten. Offline captions remain available.');
 }
 
 function showEventDialog(editing = false) {
@@ -343,7 +419,7 @@ function renderJob() {
 
 async function exportPhotos() {
   if (state.busy) return;
-  await flushPhoto();
+  await flushPhoto(); await exportSettingsWrites;
   state.busy = true;
   try {
     state.job = await api(eventURL('/export'), {method:'POST'}); renderWorkspace();
@@ -359,12 +435,17 @@ async function exportPhotos() {
 
 async function togglePhoto(id, key) {
   if (state.busy) return;
-  await flushPhoto();
+  const eventId = state.active.id;
   const photo = state.active.photos.find(item => item.id === id);
-  const {x,y,zoom,selected,favorite} = photo;
-  const settings = {x,y,zoom,selected,favorite,[key]:!photo[key]};
-  Object.assign(photo, await api(eventURL(`/photos/${id}`), {method:'PATCH',body:JSON.stringify(settings)}));
-  renderWorkspace();
+  await flushPhoto();
+  if (state.active?.id !== eventId) return;
+  const settings = {[key]:!photo[key]};
+  const previous = photo[key]; photo[key] = settings[key];
+  photoWrites = photoWrites.catch(() => {}).then(() => api(`/events/${eventId}/photos/${id}`, {method:'PATCH',body:JSON.stringify(settings)}));
+  try { await photoWrites; }
+  catch (error) { if (photo[key] === settings[key]) photo[key] = previous; throw error; }
+  // A full server snapshot could predate a slider edit made during this PATCH.
+  if (state.active?.id === eventId) renderWorkspace();
 }
 
 async function selectAll() {
@@ -373,8 +454,8 @@ async function selectAll() {
   state.busy = true; renderWorkspace();
   try {
     for (const photo of state.active.photos) {
-      const {x,y,zoom,favorite} = photo;
-      Object.assign(photo, await api(eventURL(`/photos/${photo.id}`), {method:'PATCH',body:JSON.stringify({x,y,zoom,favorite,selected:value})}));
+      await api(eventURL(`/photos/${photo.id}`), {method:'PATCH',body:JSON.stringify({selected:value})});
+      photo.selected = value;
     }
   } finally { state.busy = false; renderWorkspace(); }
 }
@@ -382,10 +463,13 @@ async function selectAll() {
 async function saveFacts(event) {
   event.preventDefault();
   const form = event.target, button = $('button[type="submit"]',form); button.disabled = true;
+  const eventId = state.active.id;
   try {
     const fields = Object.fromEntries(new FormData(form));
     const {name,date,venue,organizer,theme,photographer} = state.active;
-    state.active = await api(eventURL(), {method:'PUT',body:JSON.stringify({name,date,venue,organizer,theme,photographer,...fields})});
+    const updated = await api(`/events/${eventId}`, {method:'PUT',body:JSON.stringify({name,date,venue,organizer,theme,photographer,...fields})});
+    if (state.active?.id !== eventId) return;
+    state.active = updated;
     state.facts = {...fields}; state.factsDirty = false;
     state.caption.stale = Boolean(state.caption.text);
     $('#caption-notice').innerHTML = captionNotice(); toast('Confirmed event facts saved.');
@@ -393,14 +477,26 @@ async function saveFacts(event) {
 }
 
 async function generateCaption() {
+  if (state.busy) return;
+  if (state.caption.mode === 'ai' && !state.ai?.configured) return showAISettings();
   if (state.caption.text && !confirm('Replace the current caption draft with a new draft from your event facts?')) return;
-  // Save the visible facts first so the draft cannot accidentally use older text.
-  const form = $('#facts-form');
-  await saveFacts({preventDefault(){},target:form});
-  const {style,photo_caption,include_footer,include_credit} = state.caption;
-  const result = await api(eventURL('/captions/generate'), {method:'POST',body:JSON.stringify({style,photo_caption,include_footer,include_credit})});
-  Object.assign(state.caption,{text:result.text, missing:result.missing, dirty:true, stale:false});
-  renderWorkspace(); toast('Draft created from your event facts. Review it before posting.');
+  // Lock the workspace before the first await to avoid duplicate paid requests
+  // or switching events between saving facts and generating the caption.
+  const eventId = state.active.id;
+  const fields = Object.fromEntries(new FormData($('#facts-form')));
+  const {name,date,venue,organizer,theme,photographer} = state.active;
+  const {mode,style,photo_caption,include_footer,include_credit,length,instructions} = state.caption;
+  state.busy = true; state.generatingCaption = true; state.caption.error = ''; renderWorkspace();
+  try {
+    state.active = await api(`/events/${eventId}`, {method:'PUT',body:JSON.stringify({name,date,venue,organizer,theme,photographer,...fields})});
+    state.facts = {...fields}; state.factsDirty = false;
+    const result = await api(`/events/${eventId}/captions/generate`, {method:'POST',body:JSON.stringify({mode,style,photo_caption,include_footer,include_credit,length,instructions})});
+    Object.assign(state.caption,{text:result.text, missing:result.missing, dirty:true, stale:false, generatedMode:result.mode});
+    toast(mode === 'ai' ? 'AI caption created. Review its facts and wording before posting.' : 'Offline draft created from your event facts.');
+  } catch (error) {
+    state.caption.error = error.message;
+    toast(error.message,true);
+  } finally { state.busy = false; state.generatingCaption = false; renderWorkspace(); }
 }
 
 async function saveCaption() {
@@ -420,7 +516,7 @@ function showHelp() {
   showInfo('Your local workspace', `<p>Event projects are saved here:</p><code>${escapeHTML(state.settings.data_dir)}</code>
     <p>Each event has these folders:</p><ul><li><strong>RAW</strong> — untouched copies of imported JPG, PNG, and WebP photos. Camera RAW and HEIC files are not supported yet.</li><li><strong>EDITED</strong> — your exported, watermarked photos.</li><li><strong>CAPTIONS</strong> — the caption you saved as a text file.</li></ul>
     <p>Load your original transparent PNG watermark inside an event. It is remembered for new events; existing events keep their own template.</p>
-    <p>Everything works on this computer. Caption drafts use offline templates and your entered facts. Nothing is published automatically.</p><p>Back up the entire workspace folder to preserve your events and settings.</p>`);
+    <p>All photo editing and watermarking happen here. AI caption generation sends event text to OpenAI using your API account; the offline template remains available without internet. API keys entered in AI connection stay in memory until the app closes.</p><p>Back up the entire workspace folder to preserve your events and settings.</p>`);
 }
 
 function bindDropzone() {
@@ -435,11 +531,18 @@ function bindDropzone() {
 async function action(name) {
   const actions = {
     library, 'new-event':()=>showEventDialog(), 'edit-event':()=>showEventDialog(true), help:showHelp,
+    'ai-settings':showAISettings, 'disconnect-ai':disconnectAI,
     'add-photos':()=>$('#photo-input').click(), watermark:()=>$('#watermark-input').click(),
     export:exportPhotos, 'select-all':selectAll, 'generate-caption':generateCaption,
     'save-caption':saveCaption, 'copy-caption':copyCaption,
     'open-folder':async()=>{const result=await api(eventURL('/open-folder'),{method:'POST'});if(!result.opened)showInfo('Event folder',`<p>Your event is saved at:</p><code>${escapeHTML(result.path)}</code>`);},
-    'reset-framing':async()=>{Object.assign(selectedPhoto(),{x:.5,y:.5,zoom:1});queuePhoto();await flushPhoto();renderPreview();}
+    'reset-framing':()=>transformPhoto({x:.5,y:.5,zoom:1}),
+    'rotate-left':()=>transformPhoto({rotation:(selectedPhoto().rotation+270)%360}),
+    'rotate-right':()=>transformPhoto({rotation:(selectedPhoto().rotation+90)%360}),
+    'flip-horizontal':()=>transformPhoto({flip_horizontal:!selectedPhoto().flip_horizontal}),
+    'flip-vertical':()=>transformPhoto({flip_vertical:!selectedPhoto().flip_vertical}),
+    'reset-edits':()=>transformPhoto({...editDefaults}),
+    'compare-original':()=>{state.compareOriginal=!state.compareOriginal;refreshPreviewImage();}
   };
   if (state.busy && !['help','open-folder','copy-caption','save-caption'].includes(name)) return;
   await actions[name]?.();
@@ -453,10 +556,11 @@ document.addEventListener('click',event=>{
     if(target.dataset.event)return openEvent(target.dataset.event);
     if(target.dataset.select)return togglePhoto(target.dataset.select,'selected');
     if(target.dataset.favorite)return togglePhoto(target.dataset.favorite,'favorite');
-    if(target.dataset.tab){await flushPhoto();state.tab=target.dataset.tab;renderWorkspace();return;}
+    if(target.dataset.tab){if(state.generatingCaption)return;await flushPhoto();state.tab=target.dataset.tab;renderWorkspace();return;}
     if(target.dataset.filter){state.filter=target.dataset.filter;renderWorkspace();return;}
-    if(target.dataset.photo){await flushPhoto();state.photo=target.dataset.photo;renderGallery();renderPreview();return;}
+    if(target.dataset.photo){await flushPhoto();state.photo=target.dataset.photo;state.compareOriginal=false;renderGallery();renderPreview();return;}
     if(target.dataset.style){state.caption.style=target.dataset.style;renderWorkspace();}
+    if(target.dataset.mode){if(state.busy)return;state.caption.mode=target.dataset.mode;renderWorkspace();}
   })().catch(reportError);
 });
 
@@ -469,12 +573,13 @@ document.addEventListener('input',event=>{
   if(target.id==='event-search')renderEventCards(target.value);
   if(target.id==='caption-text'){state.caption.text=target.value;state.caption.dirty=target.value!==state.caption.saved;$('#caption-save-state').textContent=state.caption.dirty?'Unsaved changes':'Saved to CAPTIONS';}
   if(target.id==='photo-description')state.caption.photo_caption=target.value;
+  if(target.id==='caption-instructions')state.caption.instructions=target.value;
   if(target.closest('#facts-form') && target.name){state.facts[target.name]=target.value;state.factsDirty=Object.keys(state.facts).some(key=>state.facts[key]!==state.active[key]);}
   if(target.dataset.slider){
     const key=target.dataset.slider,value=Number(target.value);
     $(`#output-${key}`).textContent=key==='zoom'?`${value.toFixed(2)}×`:`${Math.round(value*100)}%`;
     if(key==='opacity')return;
-    selectedPhoto()[key]=value;queuePhoto();
+    state.compareOriginal=false;selectedPhoto()[key]=value;queuePhoto();
   }
 });
 
@@ -482,11 +587,14 @@ document.addEventListener('change',event=>{
   const target=event.target;
   if(target.id==='include-footer')state.caption.include_footer=target.checked;
   if(target.id==='include-credit')state.caption.include_credit=target.checked;
+  if(target.id==='caption-length')state.caption.length=target.value;
   if(target.id==='export-size'||target.id==='export-format')saveExportSettings().catch(reportError);
   if(target.dataset.slider==='opacity'){state.active.opacity=Number(target.value);saveExportSettings().catch(reportError);}
 });
 
 $('#event-form').addEventListener('submit',event=>submitEvent(event).catch(reportError));
+$('#ai-form').addEventListener('submit',event=>submitAI(event).catch(reportError));
+$('#ai-dialog').addEventListener('close',()=>{$('#ai-key').value='';});
 document.addEventListener('submit',event=>{if(event.target.id==='facts-form')saveFacts(event).catch(reportError);});
 $('#photo-input').addEventListener('change',event=>{const files=[...event.target.files];event.target.value='';importFiles(files).catch(reportError);});
 $('#watermark-input').addEventListener('change',event=>{const file=event.target.files[0];event.target.value='';uploadWatermark(file).catch(reportError);});
@@ -495,8 +603,8 @@ document.addEventListener('dragover',event=>{if(event.dataTransfer.types.include
 document.addEventListener('drop',event=>event.preventDefault());
 
 (async()=>{
-  const [settings,events]=await Promise.all([api('/settings'),api('/events')]);
-  state.settings=settings;state.events=events;renderLibrary();
+  const [settings,events,ai]=await Promise.all([api('/settings'),api('/events'),api('/ai/settings')]);
+  state.settings=settings;state.events=events;state.ai=ai;renderLibrary();
 })().catch(error=>{
   $('#main').innerHTML=`<div class="empty-gallery"><h2>We couldn’t open your workspace.</h2><p>${escapeHTML(error.message)}</p><p>Check that Photo Desk is running, then refresh this page.</p></div>`;
   reportError(error);

@@ -1,4 +1,4 @@
-"""Loopback-only web application. No photo or caption is sent to a remote service."""
+"""Loopback-only photo editing with optional, explicit AI requests for event text."""
 
 import io
 import json
@@ -16,14 +16,16 @@ from typing import Literal
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from starlette.background import BackgroundTask
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .ai_captions import AICaptionError, generate_ai_caption
 from .captions import make_caption
-from .imaging import compose, load_overlay, load_photo, thumbnail
-from .storage import Store, now, safe_name
+from .imaging import compose, load_overlay, load_photo, render_photo, thumbnail
+from .storage import PHOTO_DEFAULTS, Store, atomic_json, now, safe_name
 
 MAX_UPLOAD = 60 * 1024 * 1024
 
@@ -58,6 +60,13 @@ class PhotoSettings(BaseModel):
     zoom: float = Field(default=1, ge=1, le=3)
     selected: bool = True
     favorite: bool = False
+    rotation: Literal[0, 90, 180, 270] = 0
+    flip_horizontal: bool = False
+    flip_vertical: bool = False
+    brightness: float = Field(default=1, ge=.25, le=2, allow_inf_nan=False)
+    contrast: float = Field(default=1, ge=.25, le=2, allow_inf_nan=False)
+    saturation: float = Field(default=1, ge=0, le=2, allow_inf_nan=False)
+    sharpness: float = Field(default=1, ge=0, le=3, allow_inf_nan=False)
 
 
 class ExportSettings(BaseModel):
@@ -67,10 +76,18 @@ class ExportSettings(BaseModel):
 
 
 class CaptionRequest(BaseModel):
+    mode: Literal["ai", "template"] = "ai"
     style: Literal["album", "photo"] = "album"
     photo_caption: str = Field(default="", max_length=8000)
     include_footer: bool = True
     include_credit: bool = True
+    length: Literal["short", "standard", "long"] = "standard"
+    instructions: str = Field(default="", max_length=1500)
+
+
+class AISettings(BaseModel):
+    api_key: SecretStr | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._:-]+$")
 
 
 class SaveCaption(BaseModel):
@@ -99,6 +116,17 @@ def create_app(data_dir: Path) -> FastAPI:
     app = FastAPI(title="DMM Photo Desk", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store = store
     app.state.jobs = {}
+    ai_file = store.root / ".ai-settings.json"
+    saved_model = "gpt-4.1-mini"
+    if ai_file.is_file():
+        try:
+            saved_settings = json.loads(ai_file.read_text(encoding="utf-8"))
+            value = saved_settings.get("model") if isinstance(saved_settings, dict) else None
+            if value:
+                saved_model = AISettings(model=value).model
+        except (ValueError, OSError):
+            pass
+    app.state.ai = {"api_key": None, "model": os.environ.get("DMM_AI_MODEL") or saved_model}
     pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dmm-export")
     app.state.pool = pool
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
@@ -129,6 +157,18 @@ def create_app(data_dir: Path) -> FastAPI:
     async def bad_input(_request, exc):
         return JSONResponse({"detail": str(exc)}, status_code=400)
 
+    @app.exception_handler(AICaptionError)
+    async def ai_error(_request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_request, exc):
+        # Validation must never echo a submitted credential in an error response.
+        return JSONResponse({"detail": [
+            {"loc": error["loc"], "msg": error["msg"], "type": error["type"]}
+            for error in exc.errors()
+        ]}, status_code=422)
+
     def writable(event_id):
         if any(job["event_id"] == event_id and job["status"] == "running"
                for job in app.state.jobs.values()):
@@ -141,7 +181,40 @@ def create_app(data_dir: Path) -> FastAPI:
     @app.get("/api/settings")
     def settings():
         return {"data_dir": str(store.root), "has_watermark": store.template.exists(),
-                "version": "0.1.0", "offline": True}
+                "version": "0.2.0", "offline": True, "ai_requires_internet": True}
+
+    def ai_key():
+        return app.state.ai["api_key"] or os.environ.get("DMM_AI_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+
+    def ai_status():
+        return {"provider": "OpenAI", "model": app.state.ai["model"],
+                "configured": bool(ai_key()), "source": "session" if app.state.ai["api_key"] else
+                "environment" if ai_key() else "none"}
+
+    @app.get("/api/ai/settings")
+    def read_ai_settings():
+        with store.lock:
+            return ai_status()
+
+    @app.put("/api/ai/settings")
+    def configure_ai(settings: AISettings):
+        with store.lock:
+            new_key = settings.api_key.get_secret_value().strip() if settings.api_key is not None else None
+            if new_key is not None and (len(new_key) > 1000 or any(c.isspace() for c in new_key)):
+                raise ValueError("Enter a valid API key without spaces or line breaks.")
+            if settings.model is not None:
+                # Only the model name is retained on disk. Credentials stay in server memory.
+                atomic_json(ai_file, {"model": settings.model})
+                app.state.ai["model"] = settings.model
+            if new_key is not None:
+                app.state.ai["api_key"] = new_key or None
+            return ai_status()
+
+    @app.delete("/api/ai/session")
+    def clear_ai_session():
+        with store.lock:
+            app.state.ai["api_key"] = None
+            return ai_status()
 
     @app.get("/api/events")
     def events():
@@ -192,9 +265,8 @@ def create_app(data_dir: Path) -> FastAPI:
                     width, height = image.size
                     thumbnail(temp, folder / ".cache" / f"{photo_id}.jpg")
                     os.replace(temp, destination)
-                    photo = {"id": photo_id, "name": destination.name, "width": width,
-                             "height": height, "x": .5, "y": .5, "zoom": 1,
-                             "selected": True, "favorite": False}
+                    photo = {**PHOTO_DEFAULTS, "id": photo_id, "name": destination.name,
+                             "width": width, "height": height}
                     event["photos"].append(photo)
                     accepted.append(photo)
                 except ValueError as exc:
@@ -210,8 +282,9 @@ def create_app(data_dir: Path) -> FastAPI:
         with store.lock:
             writable(event_id)
             event, photo, _ = store.photo(event_id, photo_id)
-            new = settings.model_dump()
-            if any(photo.get(key) != new[key] for key in ("x", "y", "zoom")):
+            new = settings.model_dump(exclude_unset=True)
+            if any(photo.get(key, PHOTO_DEFAULTS[key]) != value for key, value in new.items()
+                   if key not in ("selected", "favorite")):
                 photo.pop("exported_at", None)
             photo.update(new)
             store.save(event)
@@ -225,15 +298,17 @@ def create_app(data_dir: Path) -> FastAPI:
             return FileResponse(folder / ".cache" / f"{photo_id}.jpg", media_type="image/jpeg")
         if kind == "original":
             return FileResponse(folder / "RAW" / photo["name"], filename=photo["name"])
-        if kind != "preview":
+        if kind not in ("preview", "before"):
             raise KeyError("Image not found.")
         mark = folder / "watermark.png"
-        if mark.exists():
+        if kind == "before":
+            image = load_photo(folder / "RAW" / photo["name"])
+            image.thumbnail((1100, 1100))
+        elif mark.exists():
             image = compose(folder / "RAW" / photo["name"], mark, photo,
                             opacity=event["opacity"], long_edge=1100)
         else:
-            image = load_photo(folder / "RAW" / photo["name"])
-            image.thumbnail((1100, 1100))
+            image = render_photo(folder / "RAW" / photo["name"], photo, long_edge=1100)
         buffer = io.BytesIO()
         image.save(buffer, "JPEG", quality=90)
         return Response(buffer.getvalue(), media_type="image/jpeg")
@@ -331,7 +406,16 @@ def create_app(data_dir: Path) -> FastAPI:
 
     @app.post("/api/events/{event_id}/captions/generate")
     def generate_caption(event_id: str, settings: CaptionRequest):
-        return make_caption(store.read(event_id), **settings.model_dump())
+        with store.lock:
+            event = store.read(event_id)
+            key, model = ai_key(), app.state.ai["model"]
+        if settings.mode == "template":
+            return {**make_caption(event, **settings.model_dump(exclude={"mode", "length", "instructions"})),
+                    "mode": "template"}
+        if not key:
+            raise HTTPException(503, "Connect an OpenAI API key in AI connection to generate AI captions. You can still choose Offline template.")
+        return generate_ai_caption(event, api_key=key, model=model,
+                                   **settings.model_dump(exclude={"mode"}))
 
     @app.get("/api/events/{event_id}/captions")
     def read_caption(event_id: str):

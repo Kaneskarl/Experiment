@@ -130,7 +130,7 @@ def test_export_caption_zip_and_repeatability(client):
     preview = client.get(f'/api/events/{item["id"]}/photos/{photo["id"]}/preview')
     assert preview.status_code == 200
     assert Image.open(io.BytesIO(preview.content)).size == (300,300)
-    draft = client.post(f'/api/events/{item["id"]}/captions/generate',json={}).json()
+    draft = client.post(f'/api/events/{item["id"]}/captions/generate',json={"mode":"template"}).json()
     assert FOOTER in draft["text"] and HASHTAGS in draft["text"]
     assert "Photos: Test Photographer" in draft["text"]
     assert not draft["missing"]

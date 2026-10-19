@@ -9,6 +9,12 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+PHOTO_DEFAULTS = {
+    "x": .5, "y": .5, "zoom": 1.0, "selected": True, "favorite": False,
+    "rotation": 0, "flip_horizontal": False, "flip_vertical": False,
+    "brightness": 1.0, "contrast": 1.0, "saturation": 1.0, "sharpness": 1.0,
+}
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -49,7 +55,9 @@ class Store:
         raise KeyError("Event not found.")
 
     def read(self, event_id: str) -> dict:
-        return json.loads((self.event_path(event_id) / "event.json").read_text(encoding="utf-8"))
+        event = json.loads((self.event_path(event_id) / "event.json").read_text(encoding="utf-8"))
+        event["photos"] = [{**PHOTO_DEFAULTS, **photo} for photo in event["photos"]]
+        return event
 
     def save(self, event: dict) -> None:
         event["updated_at"] = now()
@@ -84,7 +92,8 @@ class Store:
 
     def public(self, event: dict) -> dict:
         folder = self.event_path(event["id"])
-        return {**event, "folder": str(folder), "has_watermark": (folder / "watermark.png").exists(),
+        return {**event, "photos": [{**PHOTO_DEFAULTS, **photo} for photo in event["photos"]],
+                "folder": str(folder), "has_watermark": (folder / "watermark.png").exists(),
                 "caption_saved": (folder / "CAPTIONS" / "caption.txt").exists()}
 
     def photo(self, event_id: str, photo_id: str) -> tuple[dict, dict, Path]:

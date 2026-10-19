@@ -4,7 +4,7 @@ import math
 import warnings
 from pathlib import Path
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageEnhance, ImageOps, UnidentifiedImageError
 
 Image.MAX_IMAGE_PIXELS = 50_000_000
 SUPPORTED = {"JPEG", "PNG", "WEBP"}
@@ -49,10 +49,52 @@ def load_overlay(path: Path) -> Image.Image:
         raise ValueError("This watermark is unreadable or exceeds the 50-megapixel limit.") from exc
 
 
+def _adjustment(settings: dict, name: str, minimum: float, maximum: float) -> float:
+    """Keep older projects and unexpected stored values safe to render."""
+    try:
+        value = float(settings.get(name, 1))
+    except (TypeError, ValueError):
+        return 1.0
+    return max(minimum, min(maximum, value)) if math.isfinite(value) else 1.0
+
+
+def apply_edits(image: Image.Image, settings: dict) -> Image.Image:
+    """Return an edited copy; rotation is clockwise and precedes flips and tone edits."""
+    image = image.copy()
+    rotations = {90: Image.Transpose.ROTATE_270,
+                 180: Image.Transpose.ROTATE_180,
+                 270: Image.Transpose.ROTATE_90}
+    rotation = settings.get("rotation", 0)
+    if rotation in rotations:
+        image = image.transpose(rotations[rotation])
+    if settings.get("flip_horizontal", False):
+        image = ImageOps.mirror(image)
+    if settings.get("flip_vertical", False):
+        image = ImageOps.flip(image)
+    for name, enhancer, minimum, maximum in (
+        ("brightness", ImageEnhance.Brightness, .25, 2.0),
+        ("contrast", ImageEnhance.Contrast, .25, 2.0),
+        ("saturation", ImageEnhance.Color, 0.0, 2.0),
+        ("sharpness", ImageEnhance.Sharpness, 0.0, 3.0),
+    ):
+        value = _adjustment(settings, name, minimum, maximum)
+        if value != 1:
+            image = enhancer(image).enhance(value)
+    return image
+
+
+def render_photo(photo: Path, settings: dict, long_edge: int = 0) -> Image.Image:
+    """Preview edits without a watermark, preserving the rotated photo's aspect ratio."""
+    image = apply_edits(load_photo(photo), settings)
+    if long_edge > 0:
+        image.thumbnail((long_edge, long_edge), Image.Resampling.LANCZOS)
+    return image
+
+
 def compose(photo: Path, overlay: Path, framing: dict, *, opacity: float = 1,
             long_edge: int = 0) -> Image.Image:
     """Cover the overlay's canvas, without stretching either layer or upscaling photos."""
-    image = load_photo(photo)
+    image = apply_edits(load_photo(photo), framing)
     mark = load_overlay(overlay)
     ratio = mark.width / mark.height
     zoom = max(1.0, min(3.0, float(framing.get("zoom", 1))))
