@@ -40,6 +40,7 @@ function photoURL(photo, kind = 'thumbnail') { return `/api/events/${state.activ
 function dateLabel(value) { return new Intl.DateTimeFormat(undefined, {month:'short', day:'numeric', year:'numeric'}).format(new Date(`${value}T12:00:00`)); }
 function selectedPhotos() { return state.active?.photos.filter(photo => photo.selected) || []; }
 function selectedPhoto() { return state.active?.photos.find(photo => photo.id === state.photo); }
+function isLocalAI() { return state.ai?.provider === 'Ollama'; }
 function canDownload() { const photos = selectedPhotos(); return photos.length > 0 && photos.every(photo => photo.exported_at); }
 function disabled() { return state.busy ? 'disabled' : ''; }
 function leaveCaption() { return !(state.caption?.dirty || state.factsDirty) || confirm('You have unsaved caption or event facts. Leave without saving them?'); }
@@ -81,7 +82,7 @@ function renderLibrary(query = '') {
         ${step('03','Ready for your final review','Draft a factual caption, export your photos, and share your story.')}
       </div>
     </section>`}
-    <div class="local-note">${icon('shield')}<span><strong>Your photos stay on your computer.</strong> Editing and watermarking work locally. AI captions send only your event text to OpenAI when you choose to generate.</span></div>`;
+    <div class="local-note">${icon('shield')}<span><strong>Your photos stay on your computer.</strong> Choose local AI captions with Ollama, or send event text to OpenAI using your API account.</span></div>`;
   if (state.events.length) renderEventCards(query);
   renderSidebar();
 }
@@ -287,14 +288,14 @@ function captionsHTML() {
     </form><p class="caption-principle">“News first, faith naturally.”</p><p class="field-note">Keep names, statistics, quotations, and outcomes grounded in confirmed facts. AI drafts need your final editorial review.</p></section>
     <section class="card"><div class="caption-title"><h3>AI caption maker</h3><span class="ai-badge">${icon('sparkles')}DMM VOICE</span></div><p class="card-intro">Turn your confirmed event facts into a professional, mission-centered caption. Review the wording before publication.</p>
       <div class="caption-mode" aria-label="Caption generation method"><button data-mode="ai" class="${caption.mode === 'ai' ? 'active' : ''}" aria-pressed="${caption.mode === 'ai'}" ${disabled()}>${icon('sparkles')}AI writer</button><button data-mode="template" class="${caption.mode === 'template' ? 'active' : ''}" aria-pressed="${caption.mode === 'template'}" ${disabled()}>Offline template</button></div>
-      ${caption.mode === 'ai' ? `<div class="ai-connection-strip"><span>${state.ai?.configured ? 'API key configured' : 'Connect your OpenAI API key'}<small>${escapeHTML(state.ai?.model || 'gpt-4.1-mini')} · ${state.ai?.configured ? 'Access is checked when generating' : 'Required for AI writing'}</small></span><button class="button secondary small" data-action="ai-settings" ${disabled()}>${state.ai?.configured ? 'Settings' : 'Connect'}</button></div>` : '<p class="field-note">Offline mode arranges your entered facts without calling an AI service.</p>'}
+      ${caption.mode === 'ai' ? `<div class="ai-connection-strip"><span>${isLocalAI() ? 'Local AI · No API key' : state.ai?.configured ? 'OpenAI API key configured' : 'Choose local AI or connect OpenAI'}<small>${escapeHTML(state.ai?.model || 'gpt-4.1-mini')} · ${isLocalAI() ? 'Ollama must be running with this model installed' : state.ai?.configured ? 'Access is checked when generating' : 'Local AI works without an API key'}</small></span><button class="button secondary small" data-action="ai-settings" ${disabled()}>${state.ai?.configured ? 'Settings' : 'Connect'}</button></div>` : '<p class="field-note">Offline mode arranges your entered facts without calling an AI service.</p>'}
       <div class="caption-style" aria-label="Caption type"><button data-style="album" class="${caption.style === 'album' ? 'active' : ''}" aria-pressed="${caption.style === 'album'}">Album caption</button><button data-style="photo" class="${caption.style === 'photo' ? 'active' : ''}" aria-pressed="${caption.style === 'photo'}">Single photo</button></div>
       ${caption.style === 'photo' ? `<label>Describe this photo<textarea id="photo-description" maxlength="8000" placeholder="Who or what is shown? Use confirmed names and actions.">${escapeHTML(caption.photo_caption)}</textarea></label>` : ''}
       ${caption.mode === 'ai' ? `<div class="ai-writing-options"><label>Caption length<select id="caption-length" ${disabled()}><option value="short" ${caption.length === 'short' ? 'selected' : ''}>Short · a quick highlight</option><option value="standard" ${caption.length === 'standard' ? 'selected' : ''}>Standard · event coverage</option><option value="long" ${caption.length === 'long' ? 'selected' : ''}>Detailed · a fuller story</option></select></label>
       <label>Editorial direction <span class="field-note">Optional — guide the emphasis or tone, keeping the facts unchanged.</span><textarea id="caption-instructions" maxlength="1500" rows="2" placeholder="e.g. Emphasize youth participation and keep the tone warm." ${disabled()}>${escapeHTML(caption.instructions)}</textarea></label></div>` : ''}
       <div class="caption-options"><label class="check-label"><input type="checkbox" id="include-footer" ${caption.include_footer ? 'checked' : ''}>DMM footer &amp; hashtags</label><label class="check-label"><input type="checkbox" id="include-credit" ${caption.include_credit ? 'checked' : ''}>Photographer credit</label></div>
       <button class="button primary" data-action="generate-caption" ${state.busy || caption.mode === 'ai' && !state.ai?.configured ? 'disabled' : ''}>${icon(caption.mode === 'ai' ? 'sparkles' : 'text')}${state.generatingCaption ? 'Writing your caption…' : caption.mode === 'ai' ? 'Generate AI caption' : 'Create draft'}</button>
-      ${caption.mode === 'ai' ? '<p class="ai-send-note">Generating sends the saved event text and writing preferences to OpenAI. No photos are uploaded. API usage charges apply.</p>' : ''}
+      ${caption.mode === 'ai' ? `<p class="ai-send-note">${isLocalAI() ? 'Generation runs through Ollama on this computer. No API key or cloud upload. The first caption can take longer while the model loads.' : 'Generating sends the saved event text and writing preferences to OpenAI. No photos are uploaded. API usage charges apply.'}</p>` : ''}
       ${caption.error ? `<div class="caption-warning" role="alert"><strong>Caption generation could not finish.</strong>${escapeHTML(caption.error)} Your existing draft is preserved.</div>` : ''}
       <div class="caption-draft"><div class="caption-draft-header"><strong>Your caption</strong><span class="draft-badge">EDITORIAL REVIEW REQUIRED</span></div>
       <textarea id="caption-text" aria-label="Caption draft" maxlength="30000" placeholder="Your draft will appear here. You can also write or paste your own caption.">${escapeHTML(caption.text)}</textarea>
@@ -312,23 +313,50 @@ function captionNotice() {
 
 async function showAISettings() {
   state.ai = await api('/ai/settings');
-  $('#ai-form').reset(); $('#ai-key').value = ''; $('#ai-model').value = state.ai.model;
-  $('#ai-disconnect').hidden = state.ai.source !== 'session';
-  $('#ai-key').placeholder = state.ai.configured ? 'Leave blank to keep the configured key' : 'Paste your OpenAI API key';
-  $('#ai-status-note').textContent = state.ai.configured ? `Key configured from ${state.ai.source === 'environment' ? 'the launch environment' : 'this session'}. Generate a caption to check access.` : 'No API key is configured. Add one here, or use the offline template.';
+  $('#ai-form').reset(); $('#ai-key').value = '';
+  $('#ai-provider').value = isLocalAI() ? 'ollama' : 'openai';
+  renderAIProvider(state.ai);
   $('#ai-dialog').showModal();
+}
+
+function renderAIProvider(settings) {
+  const local = settings.provider === 'Ollama';
+  $('#ai-model').value = settings.model;
+  $('#ai-key-field').hidden = local; $('#local-ai-setup').hidden = !local;
+  $('#ai-disconnect').hidden = local || settings.source !== 'session';
+  $('#ai-key').placeholder = settings.configured ? 'Leave blank to keep the configured key' : 'Paste your OpenAI API key';
+  $('#ai-model-note').textContent = local ? 'Use a downloaded local model. qwen2.5:3b is a practical starting point for 16 GB RAM.' : 'Use an available OpenAI model supporting the Responses API and structured output.';
+  $('#ai-usage-note').textContent = local ? 'Local AI needs no API account or per-caption payment. Model downloads need internet; generation uses your PC’s hardware.' : 'OpenAI captions require internet and API billing. A ChatGPT subscription does not include API usage.';
+  $('#ai-status-note').textContent = local ? 'Save your selection, and use Check local model to verify Ollama and the downloaded model.' : settings.configured ? `Key configured from ${settings.source === 'environment' ? 'the launch environment' : 'this session'}. Generate a caption to check access.` : 'No OpenAI key is configured. Choose Local AI above to work without one.';
+}
+
+async function changeAIProvider() {
+  const provider = $('#ai-provider').value;
+  $('#ai-key').value = '';
+  const settings = await api(`/ai/settings?provider=${provider}`);
+  if ($('#ai-provider').value === provider) renderAIProvider(settings);
+}
+
+async function checkLocalAI() {
+  const button = $('[data-action="check-ollama"]'); button.disabled = true;
+  const model = $('#ai-model').value.trim();
+  $('#ai-status-note').textContent = 'Checking Ollama and the selected model…';
+  try {
+    const status = await api(`/ai/local-status?model=${encodeURIComponent(model)}`);
+    if ($('#ai-provider').value === 'ollama' && $('#ai-model').value.trim() === model) $('#ai-status-note').textContent = status.detail;
+  } finally { button.disabled = false; }
 }
 
 async function submitAI(event) {
   event.preventDefault(); const button = $('#ai-submit'); button.disabled = true;
-  const payload = {model:$('#ai-model').value.trim()};
-  if ($('#ai-key').value.trim()) payload.api_key = $('#ai-key').value.trim();
+  const payload = {provider:$('#ai-provider').value, model:$('#ai-model').value.trim()};
+  if (payload.provider === 'openai' && $('#ai-key').value.trim()) payload.api_key = $('#ai-key').value.trim();
   $('#ai-key').value = '';
   try {
     state.ai = await api('/ai/settings',{method:'PUT',body:JSON.stringify(payload)});
     $('#ai-dialog').close();
     if (state.active && state.tab === 'captions') renderWorkspace();
-    toast(state.ai.configured ? 'AI settings saved. Generate a caption to check access.' : 'Model saved. Add an API key to use AI writing.');
+    toast(isLocalAI() ? 'Local AI selected. Keep Ollama running with your model downloaded.' : state.ai.configured ? 'AI settings saved. Generate a caption to check access.' : 'Model saved. Add an API key or choose Local AI.');
   } finally { button.disabled = false; }
 }
 
@@ -516,7 +544,7 @@ function showHelp() {
   showInfo('Your local workspace', `<p>Event projects are saved here:</p><code>${escapeHTML(state.settings.data_dir)}</code>
     <p>Each event has these folders:</p><ul><li><strong>RAW</strong> — untouched copies of imported JPG, PNG, and WebP photos. Camera RAW and HEIC files are not supported yet.</li><li><strong>EDITED</strong> — your exported, watermarked photos.</li><li><strong>CAPTIONS</strong> — the caption you saved as a text file.</li></ul>
     <p>Load your original transparent PNG watermark inside an event. It is remembered for new events; existing events keep their own template.</p>
-    <p>All photo editing and watermarking happen here. AI caption generation sends event text to OpenAI using your API account; the offline template remains available without internet. API keys entered in AI connection stay in memory until the app closes.</p><p>Back up the entire workspace folder to preserve your events and settings.</p>`);
+    <p>All photo editing and watermarking happen here. Local AI uses Ollama on the computer running this app. OpenAI mode sends event text to your API account. The offline template also remains available. API keys stay in memory until the app closes.</p><p>Back up the entire workspace folder to preserve your events and settings.</p>`);
 }
 
 function bindDropzone() {
@@ -531,7 +559,7 @@ function bindDropzone() {
 async function action(name) {
   const actions = {
     library, 'new-event':()=>showEventDialog(), 'edit-event':()=>showEventDialog(true), help:showHelp,
-    'ai-settings':showAISettings, 'disconnect-ai':disconnectAI,
+    'ai-settings':showAISettings, 'disconnect-ai':disconnectAI, 'check-ollama':checkLocalAI,
     'add-photos':()=>$('#photo-input').click(), watermark:()=>$('#watermark-input').click(),
     export:exportPhotos, 'select-all':selectAll, 'generate-caption':generateCaption,
     'save-caption':saveCaption, 'copy-caption':copyCaption,
@@ -585,6 +613,7 @@ document.addEventListener('input',event=>{
 
 document.addEventListener('change',event=>{
   const target=event.target;
+  if(target.id==='ai-provider')changeAIProvider().catch(reportError);
   if(target.id==='include-footer')state.caption.include_footer=target.checked;
   if(target.id==='include-credit')state.caption.include_credit=target.checked;
   if(target.id==='caption-length')state.caption.length=target.value;

@@ -2,7 +2,7 @@
 
 A local photo workspace for **Damdamag Misyon Montanyosa**. Organize event coverage, rotate and edit photos, apply your original transparent DMM overlay, and draft captions with AI.
 
-Photo editing and watermarking run on the computer hosting the app, and originals stay untouched. **AI captions use OpenAI**, sending only your event facts and writing preferences when you click Generate. AI writing requires internet and your own OpenAI API key; the offline caption template remains available without an account.
+Photo editing and watermarking run on the computer hosting the app, and originals stay untouched. **Local AI captions use Ollama with no API key or per-caption charge.** OpenAI remains an optional paid provider. The offline caption template also works without an AI model.
 
 ## Start on your PC
 
@@ -33,7 +33,7 @@ Running the app in a cloud workspace saves files in that workspace. To create fo
 2. **Load your watermark.** Choose the original transparent PNG of your DMM design. The app preserves that artwork and its proportions; it does not recreate your logos or wording. The image shown in chat is not bundled with this repository, so load the original file on first use.
 3. **Add photos.** Select multiple JPG, PNG, or WebP files, or drop them into the empty photo area. Original bytes are copied into `RAW`; source files are not moved or changed.
 4. **Edit and frame.** Select a photo, rotate or flip it, adjust brightness, contrast, color, and sharpness, and set zoom and horizontal/vertical placement. Photos fill the overlay's shape without stretching. Settings save automatically. Mark favorites and exclude pictures you do not want to publish.
-5. **Prepare a caption.** Open Caption maker, enter verified activities, purpose, and outcomes. Connect an API key to generate an AI album or single-photo caption, or choose Offline template. Edit it, copy it, and explicitly save it to `CAPTIONS/caption.txt`.
+5. **Prepare a caption.** Open Caption maker, enter verified activities, purpose, and outcomes. Choose Local AI with Ollama or connect an OpenAI API key to generate an album or single-photo caption. Offline template remains available too. Edit the result, copy it, and explicitly save it to `CAPTIONS/caption.txt`.
 6. **Export.** Choose JPG or PNG and full crop resolution, 2048 px, or 3200 px. The image size is a maximum long edge: small photos are not enlarged. Exported copies go into `EDITED`.
 7. **Download ZIP** if useful. The ZIP includes the current selected exports and your saved caption, without duplicating the originals.
 
@@ -56,7 +56,7 @@ Adjustments apply only to the photo. The watermark is composited afterward, pres
 ```text
 Pictures/DMM Photo Desk/
 ├── .branding/default.png
-├── .ai-settings.json         Model name only; no API key
+├── .ai-settings.json         Provider and model names only; no API key
 └── Event-Date_Event-Name_unique-id/
     ├── RAW/                  Untouched imported copies
     ├── EDITED/               Watermarked publication copies
@@ -74,17 +74,43 @@ Back up the **whole storage folder** to preserve events, originals, branding, fr
 
 ## AI-powered DMM captions
 
-1. Open **AI connection** in the sidebar or **Connect** in Caption maker.
-2. Enter an OpenAI API key and a model available to that API account. The default is `gpt-4.1-mini`; the model must support the Responses API and structured output. Saving a key configures it; actual access is checked when generating a caption.
-3. Choose **AI writer**, an album or single-photo caption, the desired length, and optional editorial direction. Enter confirmed facts and click **Generate AI caption**. Visible event facts are saved before generation.
+### Local AI on your PC: no API key
 
-AI uses your OpenAI API account's usage billing. A ChatGPT subscription does not include API usage. Keys entered in the app stay in server memory for the current app session; closing and restarting the app clears them. The model name is saved separately. **Forget session key** removes an in-app key; a key supplied by the launch environment remains available until removed there. Keys are never returned by the API, put in browser storage, or saved in event files.
+For a **16 GB RAM PC with an AMD Radeon RX 6600**, start with the small `qwen2.5:3b` model:
+
+1. Install [Ollama](https://ollama.com/download) and open it.
+2. Open a terminal (PowerShell on Windows) and download the model once:
+
+   ```sh
+   ollama pull qwen2.5:3b
+   ```
+
+   The model download is approximately 2 GB. Internet is needed for installation and this download, then generation can work offline.
+3. Start DMM Photo Desk on your PC. Open **AI connection** and select **Local AI · Ollama · No API key**.
+4. Leave the model as **`qwen2.5:3b`**, click **Check local model**, then **Save connection**.
+5. Open an event → **Caption maker** → **AI writer**. Enter the facts, choose a length, and click **Generate AI caption**. Keep Ollama running.
+
+The model uses your existing DMM instructions and supplied facts; no training job or paid API account is needed. The first caption may take longer while the model loads. Start with short captions to assess speed and quality on your PC.
+
+Your 16 GB RAM can support this small model on the CPU. **RX 6600 acceleration depends on your operating system, Ollama version, and drivers; it is not guaranteed.** CPU generation is available when GPU acceleration is unavailable. This app does not install GPU drivers or enable experimental GPU overrides. Actual speed and GPU use must be checked on your PC.
+
+Local mode talks only to Ollama on the same computer, at its default port 11434. It uses downloaded models; cloud-tagged models and model entries marked as remote are excluded. It never sends an OpenAI key or silently switches to a cloud provider. If Ollama or the selected model is unavailable, the app explains how to start or download it while preserving your existing draft. Local AI selection and each provider's model choice survive app restarts.
+
+If Photo Desk runs in a cloud workspace, local means that cloud machine. **Run Photo Desk on your own PC to use your PC's RAM and GPU.** Ollama and the model are not bundled into the app download.
+
+### Optional OpenAI provider
+
+Open **AI connection**, select **OpenAI**, and enter an API key and model available to that account. The default is `gpt-4.1-mini`, which uses the Responses API and structured output. Saving a key configures it; actual access is checked when generating a caption.
+
+OpenAI uses your API account's usage billing. A ChatGPT subscription does not include API usage. Keys entered in the app stay in server memory for the current app session; closing and restarting the app clears them. Only the provider and model names are saved. **Forget session key** removes an in-app key; a key supplied by the launch environment remains available until removed there. Keys are never returned by the API, put in browser storage, or saved in event files.
 
 For a key supplied at launch, set `DMM_AI_API_KEY` in the app process environment. An existing `OPENAI_API_KEY` is also accepted. `DMM_AI_MODEL` can set the initial model. No `.env` file is automatically read. In the managed cloud environment, supply `DMM_AI_API_KEY` securely through environment settings and allow `api.openai.com`; restart the app after the binding is applied. Do not paste keys into chat or commit them to Git.
 
-The AI follows DMM's **“News first, faith naturally”** voice and is instructed to use supplied facts, omit missing information, and avoid fabricated names, statistics, quotations, and outcomes. It cannot see or describe photos unless you supply a factual description. The app flags missing core details. **AI can still make mistakes: review every factual claim before posting.**
+### DMM voice and final review
 
-Only the event's name, date, venue, organizer, theme, activities, purpose, outcomes, optional photo description, and writing preferences go to OpenAI. Photo files, local paths, and photographer credits are not sent. The request disables response storage (`store: false`). Official footer, hashtags, and photographer credit are appended locally after generation. Provider authentication, limits, refusals, and network errors are shown without replacing your existing draft or silently substituting an offline template.
+Both AI providers follow DMM's **“News first, faith naturally”** instructions: use supplied facts, omit missing information, and avoid fabricated names, statistics, quotations, and outcomes. Neither can see or describe photos unless you supply a factual description. The app flags missing core details. **AI can still make mistakes: review every factual claim before posting.**
+
+The selected AI receives only the event's name, date, venue, organizer, theme, activities, purpose, outcomes, optional photo description, and writing preferences. Local mode keeps these on your computer. OpenAI mode sends this text to OpenAI with response storage disabled (`store: false`). Photo files, local paths, and photographer credits are not sent to either model. Official footer, hashtags, and photographer credit are appended by the app afterward. Provider errors do not replace your existing draft or silently substitute an offline template.
 
 Choose **Offline template** whenever you want a local draft without AI or internet. Neither mode verifies facts or publishes automatically.
 
@@ -119,4 +145,4 @@ The optional browser check starts an isolated application and exercises the real
 .venv/bin/python tests/browser_smoke.py
 ```
 
-The browser check covers event creation, original import, transparent overlay, rotation, flipping, adjustments, original comparison, favorites, selection, offline captions, AI connection settings, a mocked AI result, controls locked during generation, clipboard, export, ZIP contents, reopening, and a narrow screen layout. It checks for browser errors and unexpected external browser requests. Node's dependency-free regression tests cover overlapping edits and settings writes. API tests mock the OpenAI transport to verify the actual Responses request, result parsing, privacy boundaries, and error handling. These checks do not establish live OpenAI access; a real API key and successful generation are required for that.
+The browser check covers event creation, photo edits, original comparison, selection, offline captions, both AI provider settings, local model status, mocked AI results, controls locked during generation, clipboard, export, ZIP contents, reopening, and a narrow screen layout. It checks for browser errors and unexpected external browser requests. Node's dependency-free tests cover overlapping edits and settings writes. API tests mock OpenAI transport and exercise the Ollama protocol against an isolated local HTTP fixture, including privacy boundaries, local-only model selection, and errors. These tests do **not** run a real downloaded language model or establish GPU acceleration. Real model output must be validated on your PC; live OpenAI access requires a working API key.

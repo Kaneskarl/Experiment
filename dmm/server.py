@@ -14,7 +14,7 @@ from datetime import date
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +25,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .ai_captions import AICaptionError, generate_ai_caption
 from .captions import make_caption
 from .imaging import compose, load_overlay, load_photo, render_photo, thumbnail
+from .local_ai import DEFAULT_MODEL as LOCAL_MODEL, generate_local_caption, ollama_status
 from .storage import PHOTO_DEFAULTS, Store, atomic_json, now, safe_name
 
 MAX_UPLOAD = 60 * 1024 * 1024
@@ -86,8 +87,9 @@ class CaptionRequest(BaseModel):
 
 
 class AISettings(BaseModel):
+    provider: Literal["openai", "ollama"] | None = None
     api_key: SecretStr | None = None
-    model: str | None = Field(default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._:-]+$")
+    model: str | None = Field(default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 
 
 class SaveCaption(BaseModel):
@@ -117,16 +119,22 @@ def create_app(data_dir: Path) -> FastAPI:
     app.state.store = store
     app.state.jobs = {}
     ai_file = store.root / ".ai-settings.json"
-    saved_model = "gpt-4.1-mini"
+    saved_models = {"openai": "gpt-4.1-mini", "ollama": LOCAL_MODEL}
+    saved_provider = "openai"
     if ai_file.is_file():
         try:
             saved_settings = json.loads(ai_file.read_text(encoding="utf-8"))
-            value = saved_settings.get("model") if isinstance(saved_settings, dict) else None
-            if value:
-                saved_model = AISettings(model=value).model
+            if isinstance(saved_settings, dict):
+                saved_provider = AISettings(provider=saved_settings.get("provider", "openai")).provider or "openai"
+                for provider in saved_models:
+                    value = saved_settings.get(f"{provider}_model") or (saved_settings.get("model") if provider == saved_provider else None)
+                    if value:
+                        saved_models[provider] = AISettings(model=value).model
         except (ValueError, OSError):
             pass
-    app.state.ai = {"api_key": None, "model": os.environ.get("DMM_AI_MODEL") or saved_model}
+    if os.environ.get("DMM_AI_MODEL"):
+        saved_models["openai"] = os.environ["DMM_AI_MODEL"]
+    app.state.ai = {"api_key": None, "provider": saved_provider, "models": saved_models}
     pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dmm-export")
     app.state.pool = pool
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]"])
@@ -181,20 +189,30 @@ def create_app(data_dir: Path) -> FastAPI:
     @app.get("/api/settings")
     def settings():
         return {"data_dir": str(store.root), "has_watermark": store.template.exists(),
-                "version": "0.2.0", "offline": True, "ai_requires_internet": True}
+                "version": "0.3.0", "offline": True, "ai_requires_internet": app.state.ai["provider"] == "openai"}
 
     def ai_key():
         return app.state.ai["api_key"] or os.environ.get("DMM_AI_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
 
-    def ai_status():
-        return {"provider": "OpenAI", "model": app.state.ai["model"],
+    def ai_status(provider=None):
+        provider = provider or app.state.ai["provider"]
+        if provider == "ollama":
+            return {"provider": "Ollama", "model": app.state.ai["models"][provider],
+                    "configured": True, "source": "local"}
+        return {"provider": "OpenAI", "model": app.state.ai["models"][provider],
                 "configured": bool(ai_key()), "source": "session" if app.state.ai["api_key"] else
                 "environment" if ai_key() else "none"}
 
     @app.get("/api/ai/settings")
-    def read_ai_settings():
+    def read_ai_settings(provider: Literal["openai", "ollama"] | None = None):
         with store.lock:
-            return ai_status()
+            return ai_status(provider)
+
+    @app.get("/api/ai/local-status")
+    def local_status(model: str | None = Query(default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")):
+        with store.lock:
+            model = model or app.state.ai["models"]["ollama"]
+        return ollama_status(model)
 
     @app.put("/api/ai/settings")
     def configure_ai(settings: AISettings):
@@ -202,10 +220,16 @@ def create_app(data_dir: Path) -> FastAPI:
             new_key = settings.api_key.get_secret_value().strip() if settings.api_key is not None else None
             if new_key is not None and (len(new_key) > 1000 or any(c.isspace() for c in new_key)):
                 raise ValueError("Enter a valid API key without spaces or line breaks.")
+            provider = settings.provider or app.state.ai["provider"]
+            models = dict(app.state.ai["models"])
             if settings.model is not None:
-                # Only the model name is retained on disk. Credentials stay in server memory.
-                atomic_json(ai_file, {"model": settings.model})
-                app.state.ai["model"] = settings.model
+                if provider == "ollama" and settings.model.lower().endswith((":cloud", "-cloud")):
+                    raise ValueError("Choose a downloaded local model, such as qwen2.5:3b.")
+                models[provider] = settings.model
+            # Provider and model names are retained; credentials stay in memory.
+            atomic_json(ai_file, {"provider": provider, "model": models[provider],
+                                  **{f"{name}_model": model for name, model in models.items()}})
+            app.state.ai.update({"provider": provider, "models": models})
             if new_key is not None:
                 app.state.ai["api_key"] = new_key or None
             return ai_status()
@@ -408,10 +432,13 @@ def create_app(data_dir: Path) -> FastAPI:
     def generate_caption(event_id: str, settings: CaptionRequest):
         with store.lock:
             event = store.read(event_id)
-            key, model = ai_key(), app.state.ai["model"]
+            key, provider = ai_key(), app.state.ai["provider"]
+            model = app.state.ai["models"][provider]
         if settings.mode == "template":
             return {**make_caption(event, **settings.model_dump(exclude={"mode", "length", "instructions"})),
                     "mode": "template"}
+        if provider == "ollama":
+            return generate_local_caption(event, model=model, **settings.model_dump(exclude={"mode"}))
         if not key:
             raise HTTPException(503, "Connect an OpenAI API key in AI connection to generate AI captions. You can still choose Offline template.")
         return generate_ai_caption(event, api_key=key, model=model,

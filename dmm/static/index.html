@@ -80,11 +80,13 @@
   </dialog>
   <dialog id="ai-dialog" class="event-dialog">
     <div class="dialog-header"><div><p class="eyebrow">WRITE WITH YOUR DMM VOICE</p><h2>AI connection</h2></div><button class="icon-button" data-close="ai-dialog" aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button></div>
-    <p class="card-intro">Connect your OpenAI API account to turn confirmed event details into a DMM caption. Only the event text and writing preferences are sent. Your photos stay on this computer.</p>
+    <p class="card-intro">Choose a local model on your PC or an OpenAI API account. Both use your confirmed event details and DMM writing rules.</p>
     <form id="ai-form" class="facts-form">
-      <label>OpenAI API key<input id="ai-key" name="api_key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your API key here" maxlength="1000"><span class="field-note" id="ai-key-note">The key stays in memory for this app session. It is never written into your event folders.</span></label>
-      <label>Model<input id="ai-model" name="model" value="gpt-4.1-mini" maxlength="100" pattern="[A-Za-z0-9._:\-]+" required><span class="field-note">Use a model available to your API account that supports the Responses API and structured output.</span></label>
-      <p class="ai-usage-note">AI captions require internet and use your OpenAI API billing. A ChatGPT subscription does not include API usage. You can always choose the offline template instead.</p>
+      <label>AI provider<select id="ai-provider" name="provider"><option value="ollama">Local AI · Ollama · No API key</option><option value="openai">OpenAI · API billing</option></select></label>
+      <label id="ai-key-field">OpenAI API key<input id="ai-key" name="api_key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your API key here" maxlength="1000"><span class="field-note" id="ai-key-note">The key stays in memory for this app session. It is never written into your event folders.</span></label>
+      <label>Model<input id="ai-model" name="model" value="gpt-4.1-mini" maxlength="100" required><span class="field-note" id="ai-model-note"></span></label>
+      <div class="local-ai-setup" id="local-ai-setup" hidden><strong>Start with qwen2.5:3b on your 16 GB PC</strong><p>Install <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer">Ollama</a>, open it, and run this once in a terminal:</p><code>ollama pull qwen2.5:3b</code><p>The download is approximately 2 GB. Once downloaded, captions can run offline. CPU mode works if your Radeon GPU is not supported.</p><button class="button secondary small" type="button" data-action="check-ollama">Check local model</button></div>
+      <p class="ai-usage-note" id="ai-usage-note"></p>
       <p id="ai-status-note" class="field-note" aria-live="polite"></p>
       <div class="dialog-actions"><button class="button ghost" type="button" id="ai-disconnect" data-action="disconnect-ai">Forget session key</button><button class="button primary" id="ai-submit" type="submit">Save connection</button></div>
     </form>

@@ -166,6 +166,30 @@ def run():
                 caption = generated
                 page.get_by_role('button',name='Save caption',exact=True).click()
                 expect(page.locator('#caption-save-state')).to_have_text('Saved to CAPTIONS')
+                # Local AI selection requires no key and persists through the real settings route.
+                page.get_by_role('button',name='Settings',exact=True).click()
+                page.locator('#ai-provider').select_option('ollama')
+                expect(page.locator('#ai-model')).to_have_value('qwen2.5:3b')
+                expect(page.locator('#ai-key')).not_to_be_visible()
+                local_status = {'running':True,'model_installed':True,'models':['qwen2.5:3b'],
+                                'model':'qwen2.5:3b','detail':'Ollama is running and the local model is installed.'}
+                page.route('**/api/ai/local-status?*',lambda route:route.fulfill(status=200,json=local_status))
+                page.get_by_role('button',name='Check local model',exact=True).click()
+                expect(page.locator('#ai-status-note')).to_have_text(local_status['detail'])
+                page.locator('#ai-submit').click()
+                expect(page.locator('#ai-dialog')).not_to_be_visible()
+                expect(page.locator('.ai-connection-strip')).to_contain_text('Local AI · No API key')
+                context.request.delete(url+'/api/ai/session')
+                assert context.request.get(url+'/api/ai/settings').json()['provider'] == 'Ollama'
+                local_caption = caption.replace('A Focus on Service','A Community of Service')
+                page.route('**/api/events/*/captions/generate',lambda route:route.fulfill(status=200,json={
+                    'text':local_caption,'missing':[],'mode':'ai','provider':'Ollama','model':'qwen2.5:3b'}))
+                page.once('dialog',lambda dialog:dialog.accept())
+                page.get_by_role('button',name='Generate AI caption',exact=True).click()
+                expect(page.locator('#caption-text')).to_have_value(local_caption)
+                caption = local_caption
+                page.get_by_role('button',name='Save caption',exact=True).click()
+                expect(page.locator('#caption-save-state')).to_have_text('Saved to CAPTIONS')
                 page.screenshot(path="/tmp/dmm-captions.png",full_page=True)
                 page.get_by_role("tab",name="Photos").click()
                 page.get_by_role("button",name="Export 1 photo",exact=True).click()
@@ -191,7 +215,7 @@ def run():
                 assert not errors, f"Browser errors: {errors}"
                 assert not external, f"Unexpected network requests: {external}"
                 browser.close()
-                print("Browser workflow passed: import, overlay, rotate, flip, adjust, compare, favorites, selection, offline caption, AI key settings, mocked AI caption, clipboard, export, ZIP, reopen, mobile. No browser errors or external requests. Live AI requires a real key.")
+                print("Browser workflow passed: photo editing, exports, offline captions, OpenAI settings, local Ollama selection without a key, model check, mocked AI captions, clipboard, ZIP, reopen, mobile. No browser errors or external requests. Real model inference is not exercised.")
         finally:
             server.terminate()
             try: server.wait(timeout=10)
